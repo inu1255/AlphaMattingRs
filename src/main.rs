@@ -1,24 +1,27 @@
 extern crate image;
 extern crate num_complex;
+extern crate time;
 
-use image::{DynamicImage, GenericImage, GenericImageView, ImageBuffer};
+use image::ImageBuffer;
 use std::collections::{HashMap, LinkedList};
+use vulkano::instance::Instance;
+use vulkano::instance::InstanceExtensions;
 
 const KI: i32 = 10;
-const KC: u32 = 25;
+const KC: f32 = 25.0;
 const KG: u32 = 4;
 
 struct Tuple {
-    f: image::Rgba<u8>,
-    b: image::Rgba<u8>,
+    f: image::Rgb<u8>,
+    b: image::Rgb<u8>,
     sigmaf: f32,
     sigmab: f32,
 }
 
 #[derive(Clone)]
 struct Ftuple {
-    f: image::Rgba<u8>,
-    b: image::Rgba<u8>,
+    f: image::Rgb<u8>,
+    b: image::Rgb<u8>,
     alphar: f32,
     confidence: f32,
 }
@@ -26,34 +29,39 @@ struct Ftuple {
 impl Ftuple {
     fn new() -> Ftuple {
         return Ftuple {
-            f: image::Rgba([0, 0, 0, 0]),
-            b: image::Rgba([0, 0, 0, 0]),
+            f: image::Rgb([0, 0, 0]),
+            b: image::Rgb([0, 0, 0]),
             alphar: 0.0,
             confidence: 0.0,
         };
     }
 }
 
-fn distence_color(a: image::Rgba<u8>, b: image::Rgba<u8>) -> u32 {
-    return ((a[0] as i32 - b[0] as i32) * (a[0] as i32 - b[0] as i32)
-        + (a[1] as i32 - b[1] as i32) * (a[1] as i32 - b[1] as i32)
-        + (a[2] as i32 - b[2] as i32) * (a[2] as i32 - b[2] as i32)) as u32;
+fn distance_point(a: (u32, u32), b: (u32, u32)) -> i32 {
+    return (a.0 as i32 - b.0 as i32).pow(2) + (a.1 as i32 - b.1 as i32).pow(2);
 }
 
-fn Sample(
-    ori_state: &DynamicImage,
+fn distence_color(a: image::Rgb<u8>, b: image::Rgb<u8>) -> f32 {
+    return ((a[0] as i32 - b[0] as i32).pow(2)
+        + (a[1] as i32 - b[1] as i32).pow(2)
+        + (a[2] as i32 - b[2] as i32).pow(2)) as f32;
+}
+
+fn sample(
+    ori_state: &ImageBuffer<image::Rgb<u8>, Vec<u8>>,
     tri_state: &ImageBuffer<image::Luma<u8>, std::vec::Vec<u8>>,
-    F: &mut LinkedList<LinkedList<(u32, u32)>>,
-    B: &mut LinkedList<LinkedList<(u32, u32)>>,
-    uT: &LinkedList<(u32, u32)>,
+    front: &mut LinkedList<LinkedList<(u32, u32)>>,
+    back: &mut LinkedList<LinkedList<(u32, u32)>>,
+    u_t: &LinkedList<(u32, u32)>,
 ) {
     let a = (360 / KG) as f32;
     let b = 1.7 * a / 9.0;
     let (w, h) = ori_state.dimensions();
-    for (x, y) in uT {
+    for p in u_t {
+        let (x, y) = *p;
         let angle = (x + y) as f32 * b % a;
-        let mut bPts: LinkedList<(u32, u32)> = LinkedList::new();
-        let mut fPts: LinkedList<(u32, u32)> = LinkedList::new();
+        let mut b_pts: LinkedList<(u32, u32)> = LinkedList::new();
+        let mut f_pts: LinkedList<(u32, u32)> = LinkedList::new();
         for i in 0..KG {
             let mut f1 = false;
             let mut f2 = false;
@@ -63,24 +71,19 @@ fn Sample(
             let ey = z.cos();
             let step = (1.0 / (ex.abs() + 1e-10)).min(1.0 / (ey.abs() + 1e-10));
             let mut t = 0.0;
-            while true {
-                let p = (*x as f32 + ex * t + 0.5) as i32;
-                let q = (*y as f32 + ey * t + 0.5) as i32;
-                if p < 0 || q < 0 {
-                    break;
-                }
-                let p = p as u32;
-                let q = q as u32;
+            loop {
+                let p = x + (ex * t + 0.5) as u32;
+                let q = y + (ey * t + 0.5) as u32;
                 if p >= w || q >= h {
                     break;
                 }
 
                 let gray = tri_state.get_pixel(p, q);
                 if !f1 && gray[0] < 50 {
-                    bPts.push_back((p, q));
+                    b_pts.push_back((p, q));
                     f1 = true;
                 } else if !f2 && gray[0] > 200 {
-                    fPts.push_back((p, q));
+                    f_pts.push_back((p, q));
                     f2 = true;
                 } else if f1 && f2 {
                     break;
@@ -89,12 +92,12 @@ fn Sample(
             }
         }
 
-        F.push_back(fPts);
-        B.push_back(bPts);
+        front.push_back(f_pts);
+        back.push_back(b_pts);
     }
 }
 
-fn comalpha(c: image::Rgba<u8>, f: image::Rgba<u8>, b: image::Rgba<u8>) -> f32 {
+fn comalpha(c: image::Rgb<u8>, f: image::Rgb<u8>, b: image::Rgb<u8>) -> f32 {
     let alpha = ((c[0] as f32 - b[0] as f32) * (f[0] as f32 - b[0] as f32)
         + (c[1] as f32 - b[1] as f32) * (f[1] as f32 - b[1] as f32)
         + (c[2] as f32 - b[2] as f32) * (f[2] as f32 - b[2] as f32))
@@ -105,14 +108,19 @@ fn comalpha(c: image::Rgba<u8>, f: image::Rgba<u8>, b: image::Rgba<u8>) -> f32 {
     return (0.0f32).max(alpha).min(1.0);
 }
 
-fn dP(s: (u32, u32), d: (u32, u32)) -> f32 {
+fn d_p(s: (u32, u32), d: (u32, u32)) -> f32 {
     return (((s.0 as i64 - d.0 as i64) * (s.0 as i64 - d.0 as i64)
         + (s.1 as i64 - d.1 as i64) * (s.1 as i64 - d.1 as i64)) as f32)
         .sqrt();
 }
 
-fn mP(ori_state: &DynamicImage, (i, j): (u32, u32), f: image::Rgba<u8>, b: image::Rgba<u8>) -> f32 {
-    let c = ori_state.get_pixel(i, j);
+fn m_p(
+    ori_state: &ImageBuffer<image::Rgb<u8>, Vec<u8>>,
+    (i, j): (u32, u32),
+    f: image::Rgb<u8>,
+    b: image::Rgb<u8>,
+) -> f32 {
+    let c = ori_state[(i, j)];
 
     let alpha = comalpha(c, f, b);
 
@@ -126,7 +134,12 @@ fn mP(ori_state: &DynamicImage, (i, j): (u32, u32), f: image::Rgba<u8>, b: image
     return result / 255.0;
 }
 
-fn nP(ori_state: &DynamicImage, (i, j): (u32, u32), f: image::Rgba<u8>, b: image::Rgba<u8>) -> f32 {
+fn n_p(
+    ori_state: &ImageBuffer<image::Rgb<u8>, Vec<u8>>,
+    (i, j): (u32, u32),
+    f: image::Rgb<u8>,
+    b: image::Rgb<u8>,
+) -> f32 {
     let (width, height) = ori_state.dimensions();
     let i1 = (1).max(i) - 1;
     let i2 = (i + 1).min(width - 1);
@@ -137,7 +150,7 @@ fn nP(ori_state: &DynamicImage, (i, j): (u32, u32), f: image::Rgba<u8>, b: image
 
     for k in i1..=i2 {
         for l in j1..=j2 {
-            let m = mP(ori_state, (k, l), f, b);
+            let m = m_p(ori_state, (k, l), f, b);
             result += m * m;
         }
     }
@@ -145,40 +158,44 @@ fn nP(ori_state: &DynamicImage, (i, j): (u32, u32), f: image::Rgba<u8>, b: image
     return result;
 }
 
-fn aP(
-    ori_state: &DynamicImage,
+fn a_p(
+    ori_state: &ImageBuffer<image::Rgb<u8>, Vec<u8>>,
     (i, j): (u32, u32),
     pf: f32,
-    f: image::Rgba<u8>,
-    b: image::Rgba<u8>,
+    f: image::Rgb<u8>,
+    b: image::Rgb<u8>,
 ) -> f32 {
-    let c = ori_state.get_pixel(i, j);
+    let c = ori_state[(i, j)];
 
     let alpha = comalpha(c, f, b);
 
     return pf + (1.0 - 2.0 * pf) * alpha;
 }
 
-fn gP(
-    ori_state: &DynamicImage,
+fn g_p(
+    ori_state: &ImageBuffer<image::Rgb<u8>, Vec<u8>>,
     p: (u32, u32),
     fp: (u32, u32),
     bp: (u32, u32),
     dpf: f32,
     pf: f32,
 ) -> f32 {
-    let f = ori_state.get_pixel(fp.0, fp.1);
-    let b = ori_state.get_pixel(bp.0, bp.1);
+    let f = ori_state[fp];
+    let b = ori_state[bp];
 
-    let tn = nP(ori_state, p, f, b).powf(3.0);
-    let ta = aP(ori_state, p, pf, f, b).powf(2.0);
+    let tn = n_p(ori_state, p, f, b).powf(3.0);
+    let ta = a_p(ori_state, p, pf, f, b).powf(2.0);
     let tf = dpf;
-    let tb = dP(p, bp).powf(4.0);
+    let tb = d_p(p, bp).powf(4.0);
 
     return tn * ta * tf * tb;
 }
 
-fn eP(ori_state: &DynamicImage, (i1, j1): (u32, u32), (i2, j2): (u32, u32)) -> f32 {
+fn e_p(
+    ori_state: &ImageBuffer<image::Rgb<u8>, Vec<u8>>,
+    (i1, j1): (u32, u32),
+    (i2, j2): (u32, u32),
+) -> f32 {
     let ci = i2 as f32 - i1 as f32;
     let cj = j2 as f32 - j1 as f32;
     let z = ((ci * ci + cj * cj) as f32).sqrt();
@@ -190,7 +207,7 @@ fn eP(ori_state: &DynamicImage, (i1, j1): (u32, u32), (i2, j2): (u32, u32)) -> f
 
     let mut result = 0.0;
 
-    let mut pre = ori_state.get_pixel(i1, j1);
+    let mut pre = ori_state[(i1, j1)];
 
     let mut ti = i1;
     let mut tj = j1;
@@ -203,7 +220,7 @@ fn eP(ori_state: &DynamicImage, (i1, j1): (u32, u32), (i2, j2): (u32, u32)) -> f
 
         let mut z = 1.0;
 
-        let cur = ori_state.get_pixel(i, j);
+        let cur = ori_state[(i, j)];
 
         if ti > j && tj == j {
             z = ej;
@@ -225,22 +242,22 @@ fn eP(ori_state: &DynamicImage, (i1, j1): (u32, u32), (i2, j2): (u32, u32)) -> f
     return result;
 }
 
-fn pfP(
-    ori_state: &DynamicImage,
+fn pf_p(
+    ori_state: &ImageBuffer<image::Rgb<u8>, Vec<u8>>,
     p: (u32, u32),
     f: &LinkedList<(u32, u32)>,
     b: &LinkedList<(u32, u32)>,
 ) -> f32 {
     let mut fmin = 1e10;
     for p1 in f {
-        let fp = eP(ori_state, p, *p1);
+        let fp = e_p(ori_state, p, *p1);
         if fp < fmin {
             fmin = fp;
         }
     }
     let mut bmin = 1e10;
     for p1 in b {
-        let bp = eP(ori_state, p, *p1);
+        let bp = e_p(ori_state, p, *p1);
         if bp < bmin {
             bmin = bp;
         }
@@ -249,61 +266,52 @@ fn pfP(
 }
 
 fn expand_known(
-    ori_state: &DynamicImage,
-    tri_state: ImageBuffer<image::Luma<u8>, std::vec::Vec<u8>>,
-) -> (
-    ImageBuffer<image::Luma<u8>, std::vec::Vec<u8>>,
-    LinkedList<(u32, u32)>,
-) {
+    ori_state: &ImageBuffer<image::Rgb<u8>, Vec<u8>>,
+    tri_state: &mut ImageBuffer<image::Luma<u8>, std::vec::Vec<u8>>,
+) -> LinkedList<(u32, u32)> {
     let (imgx, imgy) = tri_state.dimensions();
-    let mut imgbuf: ImageBuffer<image::Luma<u8>, std::vec::Vec<u8>> =
-        image::ImageBuffer::new(imgx, imgy);
-    let mut uT: LinkedList<(u32, u32)> = LinkedList::new();
+    let mut u_t: LinkedList<(u32, u32)> = LinkedList::new();
+    let mut list: LinkedList<(u32, u32, image::Luma<u8>)> = LinkedList::new();
     for x in 0..imgx {
         for y in 0..imgy {
             let pixel = tri_state.get_pixel(x, y);
             let tri = pixel[0];
             let mut ok = false;
             if tri > 0 && tri < 255 {
-                let cur_color = ori_state.get_pixel(x, y);
-                for i in -KI..KI {
+                let cur_color = ori_state[(x, y)];
+                'outer: for i in -KI..KI {
                     for j in -KI..KI {
                         let w = (x as i32 + i) as u32;
                         let h = (y as i32 + j) as u32;
                         if w > 0 && w < imgx && h > 0 && h < imgy {
-                            let tri_color = tri_state.get_pixel(w, h);
+                            let tri_color = tri_state[(w, h)];
                             if tri_color[0] == 0 || tri_color[0] == 255 {
-                                let color = ori_state.get_pixel(w, h);
-                                let d = num_complex::Complex::new(w as i32, h as i32)
-                                    - num_complex::Complex::new(x as i32, y as i32);
-                                if d.norm_sqr() < KI && distence_color(color, cur_color) < KC {
-                                    imgbuf.put_pixel(x, y, *tri_color);
+                                let color = ori_state[(w, h)];
+                                if distance_point((x, y), (w, h)) < KI
+                                    && distence_color(color, cur_color) < KC
+                                {
+                                    list.push_back((x, y, tri_color));
                                     ok = true;
+                                    break 'outer;
                                 }
                             }
                         }
-                        if ok {
-                            break;
-                        }
-                    }
-                    if ok {
-                        break;
                     }
                 }
                 if !ok {
-                    uT.push_back((x, y));
+                    u_t.push_back((x, y));
                 }
-            }
-            if !ok {
-                imgbuf.put_pixel(x, y, *tri_state.get_pixel(x, y));
             }
         }
     }
-    return (imgbuf, uT);
+    for (x, y, pixel) in list {
+        tri_state.put_pixel(x, y, pixel);
+    }
+    return u_t;
 }
 
-fn sigma2(ori_state: &DynamicImage, (xi, yj): (u32, u32)) -> f32 {
-    let pc = ori_state.get_pixel(xi, yj);
+fn sigma2(ori_state: &ImageBuffer<image::Rgb<u8>, Vec<u8>>, (xi, yj): (u32, u32)) -> f32 {
+    let pc = ori_state[(xi, yj)];
     let (width, height) = ori_state.dimensions();
 
     let i1 = (2).max(xi) - 2;
@@ -315,7 +323,7 @@ fn sigma2(ori_state: &DynamicImage, (xi, yj): (u32, u32)) -> f32 {
     let mut num = 0.0;
     for i in i1..=i2 {
         for j in j1..=j2 {
-            let temp = ori_state.get_pixel(i, j);
+            let temp = ori_state[(i, j)];
             result += distence_color(pc, temp) as f32;
             num += 1.0;
         }
@@ -325,27 +333,30 @@ fn sigma2(ori_state: &DynamicImage, (xi, yj): (u32, u32)) -> f32 {
 }
 
 fn gathering(
-    ori_state: &DynamicImage,
+    ori_state: &ImageBuffer<image::Rgb<u8>, Vec<u8>>,
     tri_state: &ImageBuffer<image::Luma<u8>, std::vec::Vec<u8>>,
-    uT: &LinkedList<(u32, u32)>,
+    u_t: &LinkedList<(u32, u32)>,
 ) -> HashMap<(u32, u32), Tuple> {
-    let mut F: LinkedList<LinkedList<(u32, u32)>> = LinkedList::new();
-    let mut B: LinkedList<LinkedList<(u32, u32)>> = LinkedList::new();
-    Sample(ori_state, &tri_state, &mut F, &mut B, &uT);
-    let mut unknownIndex: HashMap<(u32, u32), Tuple> = HashMap::new();
+    let mut front: LinkedList<LinkedList<(u32, u32)>> = LinkedList::new();
+    let mut back: LinkedList<LinkedList<(u32, u32)>> = LinkedList::new();
+    let start = time::now();
+    sample(ori_state, &tri_state, &mut front, &mut back, &u_t);
+    let end = time::now();
+    println!("Sample: {:?}", (end - start).num_milliseconds());
+    let mut unknown_index: HashMap<(u32, u32), Tuple> = HashMap::new();
 
-    for ((p, Fm), Bm) in uT.into_iter().zip(F).zip(B) {
-        let pfp = pfP(ori_state, *p, &Fm, &Bm);
+    for ((p, fm), bm) in u_t.into_iter().zip(front).zip(back) {
+        let pfp = pf_p(ori_state, *p, &fm, &bm);
         let mut gmin = 1.0e10;
 
         let mut flag = false;
         let mut tf = (0, 0);
         let mut tb = (0, 0);
 
-        for it1 in Fm {
-            let dpf = dP(*p, it1);
-            for it2 in &Bm {
-                let gp = gP(ori_state, *p, it1, *it2, dpf, pfp);
+        for it1 in fm {
+            let dpf = d_p(*p, it1);
+            for it2 in &bm {
+                let gp = g_p(ori_state, *p, it1, *it2, dpf, pfp);
                 if gp < gmin {
                     gmin = gp;
                     tf = it1;
@@ -357,29 +368,29 @@ fn gathering(
 
         if flag {
             let st = Tuple {
-                f: ori_state.get_pixel(tf.0, tf.1),
-                b: ori_state.get_pixel(tb.0, tb.1),
+                f: ori_state[tf],
+                b: ori_state[tb],
                 sigmaf: sigma2(ori_state, tf),
                 sigmab: sigma2(ori_state, tb),
             };
-            unknownIndex.insert(*p, st);
+            unknown_index.insert(*p, st);
         }
     }
-    return unknownIndex;
+    return unknown_index;
 }
 
-fn refineSample(
-    ori_state: &DynamicImage,
+fn refine_sample(
+    ori_state: &ImageBuffer<image::Rgb<u8>, Vec<u8>>,
     tri_state: &ImageBuffer<image::Luma<u8>, std::vec::Vec<u8>>,
-    uT: &LinkedList<(u32, u32)>,
-    unknownIndex: &HashMap<(u32, u32), Tuple>,
+    u_t: &LinkedList<(u32, u32)>,
+    unknown_index: &HashMap<(u32, u32), Tuple>,
 ) -> (Vec<Ftuple>, Vec<Vec<u8>>) {
     let (width, height) = ori_state.dimensions();
     let mut ftuples: Vec<Ftuple> = vec![Ftuple::new(); (width * height + 1) as usize];
     let mut alpha = vec![vec![0 as u8; height as usize]; width as usize];
     for i in 0..width {
         for j in 0..height {
-            let c = ori_state.get_pixel(i, j);
+            let c = ori_state[(i, j)];
             let indexf = (i * height + j) as usize;
             let gray = tri_state.get_pixel(i, j);
             if gray[0] == 0 {
@@ -397,7 +408,7 @@ fn refineSample(
             }
         }
     }
-    for p in uT {
+    for p in u_t {
         let (xi, yj) = *p;
         let i1 = (5).max(xi) - 5;
         let i2 = (xi + 5).min(width - 1);
@@ -413,8 +424,8 @@ fn refineSample(
                 if temp[0] == 0 || temp[0] == 255 {
                     continue;
                 }
-                if let Some(t) = unknownIndex.get(&(k, l)) {
-                    let m = mP(ori_state, (xi, yj), t.f, t.b);
+                if let Some(t) = unknown_index.get(&(k, l)) {
+                    let m = m_p(ori_state, (xi, yj), t.f, t.b);
                     if m > minvalue[2] {
                         continue;
                     }
@@ -463,7 +474,7 @@ fn refineSample(
         let mut sb = 0.0;
 
         for k in 0..num {
-            if let Some(t) = unknownIndex.get(&p[k]) {
+            if let Some(t) = unknown_index.get(&p[k]) {
                 fb += t.f[0] as f32;
                 fg += t.f[1] as f32;
                 fr += t.f[2] as f32;
@@ -484,25 +495,25 @@ fn refineSample(
         sf /= num as f32 + 1e-10;
         sb /= num as f32 + 1e-10;
 
-        let mut fc = image::Rgba([fb as u8, fg as u8, fr as u8, 255]);
-        let mut bc = image::Rgba([bb as u8, bg as u8, br as u8, 255]);
-        let pc = ori_state.get_pixel(xi, yj);
+        let mut fc = image::Rgb([fb as u8, fg as u8, fr as u8]);
+        let mut bc = image::Rgb([bb as u8, bg as u8, br as u8]);
+        let pc = ori_state[(xi, yj)];
         let df = distence_color(pc, fc);
         let db = distence_color(pc, bc);
         let tf = fc;
         let tb = bc;
 
         let index = (xi * height + yj) as usize;
-        if df < sf as u32 {
+        if df < sf {
             fc = pc;
         }
-        if db < sb as u32 {
+        if db < sb {
             bc = pc;
         }
         if fc[0] == bc[0] && fc[1] == bc[1] && fc[2] == bc[2] {
             ftuples[index].confidence = 0.00000001;
         } else {
-            ftuples[index].confidence = (-10.0 * mP(ori_state, (xi, yj), tf, tb)).exp();
+            ftuples[index].confidence = (-10.0 * m_p(ori_state, (xi, yj), tf, tb)).exp();
         }
 
         ftuples[index].f = fc;
@@ -514,17 +525,17 @@ fn refineSample(
     return (ftuples, alpha);
 }
 
-fn localSmooth(
-    ori_state: &DynamicImage,
+fn local_smooth(
+    ori_state: &ImageBuffer<image::Rgb<u8>, Vec<u8>>,
     tri_state: &ImageBuffer<image::Luma<u8>, std::vec::Vec<u8>>,
-    uT: &LinkedList<(u32, u32)>,
+    u_t: &LinkedList<(u32, u32)>,
     ftuples: &Vec<Ftuple>,
     alpha: &mut Vec<Vec<u8>>,
 ) {
     let (width, height) = ori_state.dimensions();
     let sig2: f32 = 100.0 / (9.0 * 3.1415926);
     let r = 3.0 * sig2.sqrt();
-    for it in uT {
+    for it in u_t {
         let (xi, yj) = *it;
         let i1 = (xi as f32 - r).max(0.0) as u32;
         let i2 = (xi + r as u32).min(width - 1);
@@ -534,8 +545,8 @@ fn localSmooth(
         let indexp = (xi * height + yj) as usize;
         let ptuple = &ftuples[indexp];
 
-        let mut wcfsumup = image::Rgba([0.0, 0.0, 0.0, 0.0]);
-        let mut wcbsumup = image::Rgba([0.0, 0.0, 0.0, 0.0]);
+        let mut wcfsumup = image::Rgb([0.0, 0.0, 0.0]);
+        let mut wcbsumup = image::Rgb([0.0, 0.0, 0.0]);
         let mut wcfsumdown = 0.0;
         let mut wcbsumdown = 0.0;
         let mut wfbsumup = 0.0;
@@ -548,13 +559,13 @@ fn localSmooth(
                 let indexq = (k * height + l) as usize;
                 let qtuple = &ftuples[indexq];
 
-                let d = dP((xi, yj), (k, l));
+                let d = d_p((xi, yj), (k, l));
 
                 if d > r {
                     continue;
                 }
 
-                let mut wc = 0.0;
+                let wc;
                 if d == 0.0 {
                     wc = (-(d * d) / sig2).exp() * qtuple.confidence;
                 } else {
@@ -575,7 +586,7 @@ fn localSmooth(
 
                 let wfb = qtuple.confidence * qtuple.alphar * (1.0 - qtuple.alphar);
                 wfbsundown += wfb;
-                wfbsumup += wfb * (distence_color(qtuple.f, qtuple.b) as f32).sqrt();
+                wfbsumup += wfb * distence_color(qtuple.f, qtuple.b).sqrt();
 
                 let mut delta = 0.0;
                 let temp = tri_state.get_pixel(k, l);
@@ -588,9 +599,9 @@ fn localSmooth(
             }
         }
 
-        let cp = ori_state.get_pixel(xi, yj);
-        let mut fp = image::Rgba([0, 0, 0, 0]);
-        let mut bp = image::Rgba([0, 0, 0, 0]);
+        let cp = ori_state[(xi, yj)];
+        let mut fp = image::Rgb([0, 0, 0]);
+        let mut bp = image::Rgb([0, 0, 0]);
 
         bp[0] = (255.0f32).min(wcbsumup[0] / (wcbsumdown + 1e-200)).max(0.0) as u8;
         bp[1] = (255.0f32).min(wcbsumup[1] / (wcbsumdown + 1e-200)).max(0.0) as u8;
@@ -603,8 +614,8 @@ fn localSmooth(
         //double tempalpha = comalpha(cp, fp, bp);
         let dfb = wfbsumup / (wfbsundown + 1e-200);
 
-        let conp = ((distence_color(fp, bp) as f32).sqrt() / dfb).min(1.0)
-            * (-10.0 * mP(ori_state, (xi, yj), fp, bp)).exp();
+        let conp = (distence_color(fp, bp).sqrt() / dfb).min(1.0)
+            * (-10.0 * m_p(ori_state, (xi, yj), fp, bp)).exp();
         let alp = wasumup / (wasumdown + 1e-200);
 
         let alpha_t = conp * comalpha(cp, fp, bp) + (1.0 - conp) * alp.min(1.0).max(0.0);
@@ -613,7 +624,7 @@ fn localSmooth(
     }
 }
 
-fn getMatte(alpha: Vec<Vec<u8>>) -> ImageBuffer<image::Luma<u8>, Vec<u8>> {
+fn get_matte(alpha: Vec<Vec<u8>>) -> ImageBuffer<image::Luma<u8>, Vec<u8>> {
     let h = alpha[0].len();
     let w = alpha.len();
     let mut img: ImageBuffer<image::Luma<u8>, Vec<u8>> = ImageBuffer::new(w as u32, h as u32);
@@ -626,16 +637,35 @@ fn getMatte(alpha: Vec<Vec<u8>>) -> ImageBuffer<image::Luma<u8>, Vec<u8>> {
 }
 
 fn main() {
+    let instance =
+        Instance::new(None, &InstanceExtensions::none(), None).expect("failed to create instance");
+    println!("{:?}", instance);
     let ori = image::open("input.png").unwrap();
     let tri = image::open("trimap.png").unwrap();
-    let size = ori.dimensions();
-    println!("{:?}", size);
-
-    let (tri_extend, uT) = expand_known(&ori, tri.to_luma());
-    let unknownIndex = gathering(&ori, &tri_extend, &uT);
-    let (ftuples, mut alpha) = refineSample(&ori, &tri_extend, &uT, &unknownIndex);
-    localSmooth(&ori, &tri_extend, &uT, &ftuples, &mut alpha);
-    let out = getMatte(alpha);
+    let t = -0.5;
+    let ori = ori.to_rgb();
+    let mut tri_extend = tri.to_luma();
+    println!("{:?}", t as u32);
+    let start = time::now();
+    let u_t = expand_known(&ori, &mut tri_extend);
+    let end = time::now();
+    println!("expand_known: {:?}", (end - start).num_milliseconds());
+    let start = time::now();
+    let unknown_index = gathering(&ori, &tri_extend, &u_t);
+    let end = time::now();
+    println!("gathering: {:?}", (end - start).num_milliseconds());
+    let start = time::now();
+    let (ftuples, mut alpha) = refine_sample(&ori, &tri_extend, &u_t, &unknown_index);
+    let end = time::now();
+    println!("refineSample: {:?}", (end - start).num_milliseconds());
+    let start = time::now();
+    local_smooth(&ori, &tri_extend, &u_t, &ftuples, &mut alpha);
+    let end = time::now();
+    println!("localSmooth: {:?}", (end - start).num_milliseconds());
+    let start = time::now();
+    let out = get_matte(alpha);
+    let end = time::now();
+    println!("getMatte: {:?}", (end - start).num_milliseconds());
     out.save("out.png").unwrap();
 
     // let tri_extend = image::open("triExtend.png").unwrap();
