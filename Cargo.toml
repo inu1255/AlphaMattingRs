@@ -1,11 +1,15 @@
 [package]
-name = "AlphaMatting"
+name = "alpha_matting"
 version = "0.1.0"
 authors = ["inu1255 <929909260@qq.com>"]
 edition = "2018"
 
+[lib]
+name = "alpha_matting"
+crate-type = ["rlib", "dylib"]
+
 [dependencies]
+libc = "0.2.50"
 image = "0.21.1"
-num-complex = "0.2.1"
-time = "0.1.42"
 vulkano = "0.11"
+vulkano-shaders = "0.11"
