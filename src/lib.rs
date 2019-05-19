@@ -1,8 +1,12 @@
+
 extern crate image;
 extern crate time;
 
 use image::ImageBuffer;
 use std::collections::{HashMap, LinkedList};
+use std::path::Path;
+use libc::{c_char};
+use std::ffi::{CStr};
 
 const KI: i32 = 10;
 const KC: f32 = 25.0;
@@ -633,9 +637,12 @@ fn get_matte(alpha: Vec<Vec<u8>>) -> ImageBuffer<image::Luma<u8>, Vec<u8>> {
     return img;
 }
 
-fn main() {
-    let ori = image::open("input.png").unwrap();
-    let tri = image::open("trimap.png").unwrap();
+fn shared<P>(path: P,tri: P,output_path: P)
+where
+    P: AsRef<Path>,
+{
+    let ori = image::open(path).unwrap();
+    let tri = image::open(tri).unwrap();
     let t = -0.5;
     let ori = ori.to_rgb();
     let mut tri_extend = tri.to_luma();
@@ -660,7 +667,25 @@ fn main() {
     let out = get_matte(alpha);
     let end = time::now();
     println!("getMatte: {:?}", (end - start).num_milliseconds());
-    out.save("out.png").unwrap();
+    out.save(output_path).unwrap();
+}
 
-    // let tri_extend = image::open("triExtend.png").unwrap();
+#[no_mangle]
+pub extern "C" fn run(path: *const c_char, tri_path: *const c_char, output_path: *const c_char) {
+	let path = unsafe {
+		assert!(!path.is_null());
+		CStr::from_ptr(path)
+	};
+	let path = path.to_str().unwrap();
+	let tri_path = unsafe {
+		assert!(!tri_path.is_null());
+		CStr::from_ptr(tri_path)
+	};
+	let tri_path = tri_path.to_str().unwrap();
+	let output_path = unsafe {
+		assert!(!output_path.is_null());
+		CStr::from_ptr(output_path)
+	};
+	let output_path = output_path.to_str().unwrap();
+	shared(path, tri_path, output_path);
 }
