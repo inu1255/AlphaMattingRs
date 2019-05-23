@@ -3,14 +3,13 @@ extern crate time;
 
 mod lib;
 
-use lib::Matting;
+use lib::shared;
+use std::env;
 
 fn main() {
-    let mut matting = Matting::new("a.png", "b.png");
-    let start = time::now();
-    matting.run();
-    let end = time::now();
-    println!("expand_known: {:?}", (end - start).num_milliseconds());
-    matting.ori_state.save("1.png").unwrap();
-    matting.tri_state.save("2.png").unwrap();
+    let mut args = Vec::new();
+    for s in env::args() {
+        args.push(s);
+    }
+    shared(&args[1], &args[2], &args[3]);
 }

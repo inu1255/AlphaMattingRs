@@ -68,8 +68,13 @@ fn sample(
             let step = (1.0 / (ex.abs() + 1e-10)).min(1.0 / (ey.abs() + 1e-10));
             let mut t = 0.0;
             loop {
-                let p = x + (ex * t + 0.5) as u32;
-                let q = y + (ey * t + 0.5) as u32;
+                let p = x as f32 + ex * t + 0.5;
+                let q = y as f32 + ey * t + 0.5;
+                if p < 0.0 || q < 0.0 {
+                    break;
+                }
+                let p = p as u32;
+                let q = q as u32;
                 if p >= w || q >= h {
                     break;
                 }
@@ -768,7 +773,7 @@ impl Matting {
     }
 }
 
-fn shared<P>(path: P, tri: P, output_path: P)
+pub fn shared<P>(path: P, tri: P, output_path: P)
 where
     P: AsRef<Path>,
 {
