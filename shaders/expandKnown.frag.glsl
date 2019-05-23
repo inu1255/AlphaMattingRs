@@ -20,43 +20,76 @@ vec3 getOri(vec2 coord){
   return color.xyz;
 }
 
-vec3 getTri(){
-  vec4 color=texture(triState,(gl_FragCoord.xy)/push_constants.scale);
-  return color.xyz;
+vec4 getTri(){
+  vec4 tri=texture(triState,(gl_FragCoord.xy)/push_constants.scale);
+  if(tri.w==0.){
+    tri=vec4(.5,.5,.5,1);
+  }else if(tri.x<.5){
+    tri=vec4(0,0,0,1);
+  }else{
+    tri=vec4(1,1,1,1);
+  }
+  return tri;
 }
 
 vec4 getTri(vec2 coord){
-  return texture(triState,coord);
+  vec4 tri=texture(triState,coord);
+  if(tri.w==0.){
+    tri=vec4(.5,.5,.5,1);
+  }else if(tri.x<.5){
+    tri=vec4(0,0,0,1);
+  }else{
+    tri=vec4(1,1,1,1);
+  }
+  return tri;
 }
 
 void main(){
-  float tri=getTri().x;
-  f_color=texture(triState,(gl_FragCoord.xy)/push_constants.scale);
+  f_color=getTri();
   
-  // unknown region
-  if(tri>0.&&tri<1.){
-    float x=gl_FragCoord.x,
-    y=gl_FragCoord.y;
-    
+  if(f_color.x==0.||f_color.x==1.){
     const float kI=push_constants.kI;
-    
-    vec3 curColor=getOri();
+    int flag=0;
     for(float i=-kI;i<kI;i+=1.){
       for(float j=-kI;j<kI;j+=1.){
         float w=gl_FragCoord.x+i;
         float h=gl_FragCoord.y+j;
         if(w>0.&&w<push_constants.scale.x
         &&h>0.&&h<push_constants.scale.y){
-          vec2 coord=vec2(w,h);
-          vec3 color=getOri(coord/push_constants.scale);
-          vec4 triColor=getTri(coord/push_constants.scale);
-          if((triColor.x==0.||triColor.x==1.)
-          &&distance(coord,gl_FragCoord.xy)<kI
-          &&distance(color,curColor)<push_constants.kC){
-            f_color=triColor;
+          vec2 coord=vec2(w,h)/push_constants.scale;
+          vec4 triColor=getTri(coord);
+          if(triColor.x==0.){
+            flag|=1;
+          }else if(triColor.x==1.){
+            flag|=2;
+          }
+          if(flag==3){
+            f_color=vec4(.5,.5,.5,1);
           }
         }
       }
     }
   }
+  // if(f_color.x>0.&&f_color.x<1.){
+  //   const float kI=push_constants.kI;
+    
+  //   vec3 curColor=getOri();
+  //   for(float i=-kI;i<kI;i+=1.){
+  //     for(float j=-kI;j<kI;j+=1.){
+  //       float w=gl_FragCoord.x+i;
+  //       float h=gl_FragCoord.y+j;
+  //       if(w>0.&&w<push_constants.scale.x
+  //       &&h>0.&&h<push_constants.scale.y){
+  //         vec2 coord=vec2(w,h);
+  //         vec3 color=getOri(coord/push_constants.scale);
+  //         vec4 triColor=getTri(coord/push_constants.scale);
+  //         if((triColor.x==0.||triColor.x==1.)
+  //         &&distance(coord,gl_FragCoord.xy)<kI
+  //         &&distance(color,curColor)<push_constants.kC){
+  //           f_color=triColor;
+  //         }
+  //       }
+  //     }
+  //   }
+  // }
 }

@@ -151,6 +151,7 @@ impl Shared {
                                 Format::R8G8B8A8Unorm, Some(queue.family())).unwrap();
 
         let (tri_state, tri_future) = {
+            // matting.tri_state.save("tri_state.png").unwrap();
             let image = matting.tri_state.into_raw().clone();
             ImmutableImage::from_iter(
                 image.iter().cloned(),
@@ -194,8 +195,8 @@ impl Shared {
 
         self.future.take().unwrap().then_signal_fence_and_flush().unwrap()
                 .wait(None).unwrap();
-            
-        self.save_image(self.tri_extend.clone(), "0.png");
+        
+        // self.save_image(self.tri_extend.clone(), "0.png");
 
         let buffer_content = self.buf.read().unwrap();
         let image = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, &buffer_content[..]).unwrap();
@@ -707,14 +708,16 @@ impl Matting {
         for x in 0..self.width {
             for y in 0..self.height {
                 let pixel = self.tri_state.get_pixel(x, y);
-                if pixel[0] == 255 {
-                    // 前景
-                    self.tables[0][x as usize][y as usize] = (1.0, 1.0);
-                    self.stacks[0].push_back((x, y, 1.0));
-                } else if pixel[0] == 0 {
-                    // 背景
-                    self.tables[1][x as usize][y as usize] = (1.0, 1.0);
-                    self.stacks[1].push_back((x, y, 1.0));
+                if pixel[3] == 255 {
+                    if pixel[0] == 255 {
+                        // 前景
+                        self.tables[0][x as usize][y as usize] = (1.0, 1.0);
+                        self.stacks[0].push_back((x, y, 1.0));
+                    } else if pixel[0] == 0 {
+                        // 背景
+                        self.tables[1][x as usize][y as usize] = (1.0, 1.0);
+                        self.stacks[1].push_back((x, y, 1.0));
+                    }
                 }
             }
         }
@@ -728,14 +731,15 @@ impl Matting {
         for x in 0..self.width {
             for y in 0..self.height {
                 let pixel = self.tri_state.get_pixel(x, y);
-                if pixel[0] > 0 && pixel[0] < 255 {
+                if pixel[3] < 255 || pixel[0] > 0 && pixel[0] < 255 {
                     let (fd, fv) = self.tables[0][x as usize][y as usize];
                     let (bd, bv) = self.tables[1][x as usize][y as usize];
                     if fd >= 0.98 && fv > bv {
                         self.tri_state.put_pixel(x, y, image::Rgba([255,255,255,255]));
-                    }
-                    if bd >= 0.98 && bv > fv {
+                    } else if bd >= 0.98 && bv > fv {
                         self.tri_state.put_pixel(x, y, image::Rgba([0,0,0,255]));
+                    } else {
+                        self.tri_state.put_pixel(x, y, image::Rgba([128,128,128,255]));
                     }
                 }
             }
