@@ -1,12 +1,11 @@
-
 extern crate image;
 extern crate time;
 
 use image::ImageBuffer;
+use libc::c_char;
 use std::collections::{HashMap, LinkedList};
+use std::ffi::CStr;
 use std::path::Path;
-use libc::{c_char};
-use std::ffi::{CStr};
 
 const KI: i32 = 10;
 const KC: f32 = 25.0;
@@ -36,10 +35,6 @@ impl Ftuple {
             confidence: 0.0,
         };
     }
-}
-
-fn distance_point(a: (u32, u32), b: (u32, u32)) -> i32 {
-    return (a.0 as i32 - b.0 as i32).pow(2) + (a.1 as i32 - b.1 as i32).pow(2);
 }
 
 fn distence_color(a: image::Rgb<u8>, b: image::Rgb<u8>) -> f32 {
@@ -272,42 +267,42 @@ fn expand_known(
 ) -> LinkedList<(u32, u32)> {
     let (imgx, imgy) = tri_state.dimensions();
     let mut u_t: LinkedList<(u32, u32)> = LinkedList::new();
-    let mut list: LinkedList<(u32, u32, image::Luma<u8>)> = LinkedList::new();
+    // let mut list: LinkedList<(u32, u32, image::Luma<u8>)> = LinkedList::new();
     for x in 0..imgx {
         for y in 0..imgy {
             let pixel = tri_state.get_pixel(x, y);
             let tri = pixel[0];
-            let mut ok = false;
+            // let mut ok = false;
             if tri > 0 && tri < 255 {
-                let cur_color = ori_state[(x, y)];
-                'outer: for i in -KI..KI {
-                    for j in -KI..KI {
-                        let w = (x as i32 + i) as u32;
-                        let h = (y as i32 + j) as u32;
-                        if w > 0 && w < imgx && h > 0 && h < imgy {
-                            let tri_color = tri_state[(w, h)];
-                            if tri_color[0] == 0 || tri_color[0] == 255 {
-                                let color = ori_state[(w, h)];
-                                if distance_point((x, y), (w, h)) < KI
-                                    && distence_color(color, cur_color) < KC
-                                {
-                                    list.push_back((x, y, tri_color));
-                                    ok = true;
-                                    break 'outer;
-                                }
-                            }
-                        }
-                    }
-                }
-                if !ok {
-                    u_t.push_back((x, y));
-                }
+                // let cur_color = ori_state[(x, y)];
+                // 'outer: for i in -KI..KI {
+                //     for j in -KI..KI {
+                //         let w = (x as i32 + i) as u32;
+                //         let h = (y as i32 + j) as u32;
+                //         if w > 0 && w < imgx && h > 0 && h < imgy {
+                //             let tri_color = tri_state[(w, h)];
+                //             if tri_color[0] == 0 || tri_color[0] == 255 {
+                //                 let color = ori_state[(w, h)];
+                //                 if distance_point((x, y), (w, h)) < KI
+                //                     && distence_color(color, cur_color) < KC
+                //                 {
+                //                     list.push_back((x, y, tri_color));
+                //                     ok = true;
+                //                     break 'outer;
+                //                 }
+                //             }
+                //         }
+                //     }
+                // }
+                // if !ok {
+                u_t.push_back((x, y));
+                // }
             }
         }
     }
-    for (x, y, pixel) in list {
-        tri_state.put_pixel(x, y, pixel);
-    }
+    // for (x, y, pixel) in list {
+    //     tri_state.put_pixel(x, y, pixel);
+    // }
     return u_t;
 }
 
@@ -637,7 +632,143 @@ fn get_matte(alpha: Vec<Vec<u8>>) -> ImageBuffer<image::Luma<u8>, Vec<u8>> {
     return img;
 }
 
-fn shared<P>(path: P,tri: P,output_path: P)
+#[inline]
+fn dc(a: image::Rgb<u8>, b: image::Rgb<u8>) -> f32 {
+    return ((a[0] as i32 - b[0] as i32).abs()
+        + (a[1] as i32 - b[1] as i32).abs()
+        + (a[2] as i32 - b[2] as i32).abs()) as f32
+        / 765.0;
+}
+
+#[derive(Debug)]
+pub struct Matting {
+    pub ori_state: ImageBuffer<image::Rgb<u8>, Vec<u8>>,
+    pub tri_state: ImageBuffer<image::Luma<u8>, std::vec::Vec<u8>>,
+    tables: Vec<Vec<Vec<(f32, f32)>>>,
+    stacks: Vec<LinkedList<(u32, u32, f32)>>,
+    width: u32,
+    height: u32,
+}
+
+impl Matting {
+    pub fn new<P>(ori_path: P, tri_path: P) -> Self
+    where
+        P: AsRef<Path>,
+    {
+        let ori = image::open(ori_path).unwrap();
+        let tri = image::open(tri_path).unwrap();
+        let ori_state = ori.to_rgb();
+        let tri_state = tri.to_luma();
+        return Self::from(ori_state, tri_state);
+    }
+
+    pub fn from(
+        ori_state: ImageBuffer<image::Rgb<u8>, Vec<u8>>,
+        tri_state: ImageBuffer<image::Luma<u8>, std::vec::Vec<u8>>,
+    ) -> Self {
+        let (width, height) = tri_state.dimensions();
+        let tables = vec![vec![vec![(0.0, 0.0); height as usize]; width as usize]; 2];
+        let stacks: Vec<LinkedList<(u32, u32, f32)>> = vec![LinkedList::new(); 2];
+        Self {
+            ori_state: ori_state,
+            tri_state: tri_state,
+            stacks: stacks,
+            tables: tables,
+            width: width,
+            height: height,
+        }
+    }
+
+    fn compare(&mut self, (x, y): (u32, u32), cur: f32, color: image::Rgb<u8>, idx: usize) {
+        if x < self.width && y < self.height {
+            let (d, _) = self.tables[idx][x as usize][y as usize];
+            if d < 0.98 {
+                // 相似度已经很高了
+                let neighbor_color = self.ori_state.get_pixel(x, y);
+                // 相邻相似度
+                let diff = 1.0 - dc(color, *neighbor_color);
+                // 相对相似度
+                if diff > 0.98 {
+                    let val = diff * cur;
+                    self.tables[idx][x as usize][y as usize] = (diff, val);
+                    if diff > 0.98 {
+                        self.stacks[idx].push_back((x, y, val));
+                    }
+                }
+            }
+        }
+    }
+
+    fn expand(&mut self, x: u32, y: u32, v: f32, idx: usize) {
+        let color = *self.ori_state.get_pixel(x, y);
+        if x > 0 {
+            if y > 0 {
+                self.compare((x - 1, y - 1), v, color, idx);
+            }
+            self.compare((x - 1, y), v, color, idx);
+            if y < self.height - 1 {
+                self.compare((x - 1, y + 1), v, color, idx);
+            }
+        }
+        if y > 0 {
+            self.compare((x, y - 1), v, color, idx);
+        }
+        self.compare((x, y), v, color, idx);
+        if y < self.height - 1 {
+            self.compare((x, y + 1), v, color, idx);
+        }
+        if x < self.width - 1 {
+            if y > 0 {
+                self.compare((x + 1, y - 1), v, color, idx);
+            }
+            self.compare((x + 1, y), v, color, idx);
+            if y < self.height - 1 {
+                self.compare((x + 1, y + 1), v, color, idx);
+            }
+        }
+    }
+
+    pub fn run(&mut self) {
+        for x in 0..self.width {
+            for y in 0..self.height {
+                let pixel = self.tri_state.get_pixel(x, y);
+                if pixel[0] == 255 {
+                    // 前景
+                    self.tables[0][x as usize][y as usize] = (1.0, 1.0);
+                    self.stacks[0].push_back((x, y, 1.0));
+                } else if pixel[0] == 0 {
+                    // 背景
+                    self.tables[1][x as usize][y as usize] = (1.0, 1.0);
+                    self.stacks[1].push_back((x, y, 1.0));
+                }
+            }
+        }
+        for idx in 0..2 {
+            while self.stacks[idx].len() > 0 {
+                if let Some((x, y, v)) = self.stacks[idx].pop_front() {
+                    self.expand(x, y, v, idx);
+                }
+            }
+        }
+        for x in 0..self.width {
+            for y in 0..self.height {
+                let pixel = self.tri_state.get_pixel(x, y);
+                if pixel[0] > 0 && pixel[0] < 255 {
+                    let (fd, fv) = self.tables[0][x as usize][y as usize];
+                    let (bd, bv) = self.tables[1][x as usize][y as usize];
+                    if fd >= 0.98 && fv > bv {
+                        self.tri_state.put_pixel(x, y, image::Luma([255]));
+                    }
+                    if bd >= 0.98 && bv > fv {
+                        self.tri_state.put_pixel(x, y, image::Luma([0]));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn shared<P>(path: P, tri: P, output_path: P)
 where
     P: AsRef<Path>,
 {
@@ -645,8 +776,13 @@ where
     let tri = image::open(tri).unwrap();
     let t = -0.5;
     let ori = ori.to_rgb();
-    let mut tri_extend = tri.to_luma();
+    let tri_extend = tri.to_luma();
     println!("{:?}", t as u32);
+    let mut matting = Matting::from(ori, tri_extend);
+    matting.run();
+    let ori = matting.ori_state;
+    let mut tri_extend = matting.tri_state;
+    tri_extend.save("out.png").unwrap();
     let start = time::now();
     let u_t = expand_known(&ori, &mut tri_extend);
     let end = time::now();
@@ -672,20 +808,20 @@ where
 
 #[no_mangle]
 pub extern "C" fn run(path: *const c_char, tri_path: *const c_char, output_path: *const c_char) {
-	let path = unsafe {
-		assert!(!path.is_null());
-		CStr::from_ptr(path)
-	};
-	let path = path.to_str().unwrap();
-	let tri_path = unsafe {
-		assert!(!tri_path.is_null());
-		CStr::from_ptr(tri_path)
-	};
-	let tri_path = tri_path.to_str().unwrap();
-	let output_path = unsafe {
-		assert!(!output_path.is_null());
-		CStr::from_ptr(output_path)
-	};
-	let output_path = output_path.to_str().unwrap();
-	shared(path, tri_path, output_path);
+    let path = unsafe {
+        assert!(!path.is_null());
+        CStr::from_ptr(path)
+    };
+    let path = path.to_str().unwrap();
+    let tri_path = unsafe {
+        assert!(!tri_path.is_null());
+        CStr::from_ptr(tri_path)
+    };
+    let tri_path = tri_path.to_str().unwrap();
+    let output_path = unsafe {
+        assert!(!output_path.is_null());
+        CStr::from_ptr(output_path)
+    };
+    let output_path = output_path.to_str().unwrap();
+    shared(path, tri_path, output_path);
 }
