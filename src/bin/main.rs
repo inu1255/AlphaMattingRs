@@ -8,6 +8,6 @@ fn main() {
     for s in env::args() {
         args.push(s);
     }
-    let mut shared = Shared::new(&args[1], &args[2]);
+    let mut shared = Shared::new(&args[1], &args[2], 0.99, true);
     shared.run(&args[3]);
 }

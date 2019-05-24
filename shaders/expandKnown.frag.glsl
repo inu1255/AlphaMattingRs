@@ -4,6 +4,7 @@ layout(location=0)out vec4 f_color;
 
 layout(set=0,binding=0)uniform sampler2D oriState;
 layout(set=0,binding=1)uniform sampler2D triState;
+layout(set=0,binding=2)uniform sampler2D oldState;
 layout(push_constant)uniform PushConstants{
   vec2 scale;
   float kC;
@@ -22,7 +23,7 @@ vec3 getOri(vec2 coord){
 
 vec4 getTri(){
   vec4 tri=texture(triState,(gl_FragCoord.xy)/push_constants.scale);
-  if(tri.w==0.){
+  if(tri.w<1.){
     tri=vec4(.5,.5,.5,1);
   }else if(tri.x<.5){
     tri=vec4(0,0,0,1);
@@ -34,7 +35,7 @@ vec4 getTri(){
 
 vec4 getTri(vec2 coord){
   vec4 tri=texture(triState,coord);
-  if(tri.w==0.){
+  if(tri.w<1.){
     tri=vec4(.5,.5,.5,1);
   }else if(tri.x<.5){
     tri=vec4(0,0,0,1);
@@ -45,6 +46,11 @@ vec4 getTri(vec2 coord){
 }
 
 void main(){
+  vec4 old=texture(oldState,(gl_FragCoord.xy)/push_constants.scale);
+  if(old.w==1.&&(old.x==0.||old.x==1.)) {
+    f_color=old;
+    return;
+  }
   f_color=getTri();
   
   if(f_color.x==0.||f_color.x==1.){

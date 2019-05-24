@@ -4,8 +4,8 @@ extern crate image;
 extern crate vulkano_shaders;
 
 use std::path::Path;
-use libc::c_char;
-use std::ffi::CStr;
+use libc::{c_char, c_float};
+use std::ffi::{CStr};
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBuffer, DynamicState};
 use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
@@ -84,6 +84,7 @@ pub struct Shared {
     future: Option<Box<GpuFuture>>,
     ori_state: Arc<ImmutableImage<Format>>,
     tri_state: Arc<ImmutableImage<Format>>,
+    old_state: Arc<ImmutableImage<Format>>,
     tri_extend: Arc<StorageImage<Format>>,
     fb_state: Arc<StorageImage<Format>>,
     back_state: Arc<StorageImage<Format>>,
@@ -91,10 +92,11 @@ pub struct Shared {
     ac_state: Arc<StorageImage<Format>>,
     vertex_buffer: Arc<CpuAccessibleBuffer<[Vertex]>>,
     buf: Arc<CpuAccessibleBuffer<[u8]>>,
+    dev: bool,
 }
 
 impl Shared {
-    pub fn new<P>(ori_path: P, tri_path: P) -> Self
+    pub fn new<P>(ori_path: P, tri_path: P, limit: f32, dev: bool) -> Self
     where
         P: AsRef<Path>,
     {
@@ -120,12 +122,25 @@ impl Shared {
         ];
         let vertex_buffer = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(), vertexs.into_iter()).unwrap();
 
-        let mut matting = Matting::new(ori_path, tri_path);
-        matting.run();
+        let mut matting = Matting::new(ori_path, tri_path, limit);
         let size = matting.ori_state.dimensions();
-        let image = matting.ori_state.into_raw().clone();
         let (width, height) = size;
+        let (old_state, old_future) = {
+            let image = matting.tri_state.clone().into_raw().clone();
+            ImmutableImage::from_iter(
+                image.iter().cloned(),
+                Dimensions::Dim2d {
+                    width: width,
+                    height: height,
+                },
+                Format::R8G8B8A8Unorm,
+                queue.clone(),
+            )
+            .unwrap()
+        };
+        matting.run();
         let (ori_state, ori_future) = {
+            let image = matting.ori_state.into_raw().clone();
             ImmutableImage::from_iter(
                 image.iter().cloned(),
                 Dimensions::Dim2d {
@@ -136,6 +151,7 @@ impl Shared {
                 queue.clone(),
             ).unwrap()
         };
+
         let buf = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(), (0 .. width * height * 4).map(|_| 0u8))
             .expect("failed to create buffer");
 
@@ -151,7 +167,9 @@ impl Shared {
                                 Format::R8G8B8A8Unorm, Some(queue.family())).unwrap();
 
         let (tri_state, tri_future) = {
-            // matting.tri_state.save("tri_state.png").unwrap();
+            if dev {
+                matting.tri_state.save("tri_state.png").unwrap();
+            }
             let image = matting.tri_state.into_raw().clone();
             ImmutableImage::from_iter(
                 image.iter().cloned(),
@@ -166,12 +184,14 @@ impl Shared {
         };
 
         Self {
+            dev: dev,
             queue: queue,
             device: device,
             size: size,
-            future: Some(Box::new(ori_future.join(tri_future)) as Box<GpuFuture>),
+            future: Some(Box::new(ori_future.join(old_future).join(tri_future)) as Box<GpuFuture>),
             ori_state: ori_state,
             tri_state: tri_state,
+            old_state: old_state,
             tri_extend: tri_extend,
             fb_state: fb_state,
             back_state: back_state,
@@ -196,7 +216,9 @@ impl Shared {
         self.future.take().unwrap().then_signal_fence_and_flush().unwrap()
                 .wait(None).unwrap();
         
-        // self.save_image(self.tri_extend.clone(), "0.png");
+        if self.dev {
+            self.save_image(self.tri_extend.clone(), "tri_extend.png");
+        }
 
         let buffer_content = self.buf.read().unwrap();
         let image = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, &buffer_content[..]).unwrap();
@@ -204,11 +226,9 @@ impl Shared {
     }
 
     fn expand_known(&mut self) {
-        let tri_state = &self.tri_state;
         let device = &self.device;
         let queue = &self.queue;
         let (width, height) = self.size;
-        let ori_state = &self.ori_state;
         let image = &self.tri_extend;
         
         let render_pass = Arc::new(vulkano::single_pass_renderpass!(device.clone(),
@@ -262,8 +282,9 @@ impl Shared {
             SamplerAddressMode::Repeat, 0.0, 1.0, 0.0, 0.0).unwrap();
 
         let set = Arc::new(PersistentDescriptorSet::start(pipeline.clone(), 0)
-            .add_sampled_image(ori_state.clone(), sampler.clone()).unwrap()
-            .add_sampled_image(tri_state.clone(), sampler.clone()).unwrap()
+            .add_sampled_image(self.ori_state.clone(), sampler.clone()).unwrap()
+            .add_sampled_image(self.tri_state.clone(), sampler.clone()).unwrap()
+            .add_sampled_image(self.old_state.clone(), sampler.clone()).unwrap()
             .build().unwrap()
         );
 
@@ -619,15 +640,16 @@ fn dc(a: image::Rgba<u8>, b: image::Rgba<u8>) -> f32 {
 #[derive(Debug)]
 pub struct Matting {
     pub ori_state: ImageBuffer<image::Rgba<u8>, Vec<u8>>,
-    pub tri_state: ImageBuffer<image::Rgba<u8>, std::vec::Vec<u8>>,
+    pub tri_state: ImageBuffer<image::Rgba<u8>, Vec<u8>>,
     tables: Vec<Vec<Vec<(f32, f32)>>>,
     stacks: Vec<LinkedList<(u32, u32, f32)>>,
     width: u32,
     height: u32,
+    limit: f32,
 }
 
 impl Matting {
-    pub fn new<P>(ori_path: P, tri_path: P) -> Self
+    pub fn new<P>(ori_path: P, tri_path: P, limit: f32) -> Self
     where
         P: AsRef<Path>,
     {
@@ -635,12 +657,13 @@ impl Matting {
         let tri = image::open(tri_path).unwrap();
         let ori_state = ori.to_rgba();
         let tri_state = tri.to_rgba();
-        return Self::from(ori_state, tri_state);
+        return Self::from(ori_state, tri_state, limit);
     }
 
     pub fn from(
         ori_state: ImageBuffer<image::Rgba<u8>, Vec<u8>>,
-        tri_state: ImageBuffer<image::Rgba<u8>, std::vec::Vec<u8>>,
+        tri_state: ImageBuffer<image::Rgba<u8>, Vec<u8>>,
+        limit: f32,
     ) -> Self {
         let (width, height) = tri_state.dimensions();
         let tables = vec![vec![vec![(0.0, 0.0); height as usize]; width as usize]; 2];
@@ -652,24 +675,22 @@ impl Matting {
             tables: tables,
             width: width,
             height: height,
+            limit: limit,
         }
     }
 
     fn compare(&mut self, (x, y): (u32, u32), cur: f32, color: image::Rgba<u8>, idx: usize) {
         if x < self.width && y < self.height {
             let (d, _) = self.tables[idx][x as usize][y as usize];
-            if d < 0.98 {
-                // 相似度已经很高了
+            if d < self.limit { // 相似度已经很高了
                 let neighbor_color = self.ori_state.get_pixel(x, y);
                 // 相邻相似度
                 let diff = 1.0 - dc(color, *neighbor_color);
-                // 相对相似度
-                if diff > 0.98 {
+                if diff > self.limit {
+                    // 相对相似度
                     let val = diff * cur;
                     self.tables[idx][x as usize][y as usize] = (diff, val);
-                    if diff > 0.98 {
-                        self.stacks[idx].push_back((x, y, val));
-                    }
+                    self.stacks[idx].push_back((x, y, val));
                 }
             }
         }
@@ -708,13 +729,11 @@ impl Matting {
         for x in 0..self.width {
             for y in 0..self.height {
                 let pixel = self.tri_state.get_pixel(x, y);
-                if pixel[3] == 255 {
-                    if pixel[0] == 255 {
-                        // 前景
+                if pixel[3] == 255 { // 非透明的点
+                    if pixel[0] == 255 { // 前景
                         self.tables[0][x as usize][y as usize] = (1.0, 1.0);
                         self.stacks[0].push_back((x, y, 1.0));
-                    } else if pixel[0] == 0 {
-                        // 背景
+                    } else if pixel[0] == 0 { // 背景
                         self.tables[1][x as usize][y as usize] = (1.0, 1.0);
                         self.stacks[1].push_back((x, y, 1.0));
                     }
@@ -734,12 +753,10 @@ impl Matting {
                 if pixel[3] < 255 || pixel[0] > 0 && pixel[0] < 255 {
                     let (fd, fv) = self.tables[0][x as usize][y as usize];
                     let (bd, bv) = self.tables[1][x as usize][y as usize];
-                    if fd >= 0.98 && fv > bv {
+                    if fd >= self.limit && fv > bv {
                         self.tri_state.put_pixel(x, y, image::Rgba([255,255,255,255]));
-                    } else if bd >= 0.98 && bv > fv {
+                    } else if bd >= self.limit && bv > fv {
                         self.tri_state.put_pixel(x, y, image::Rgba([0,0,0,255]));
-                    } else {
-                        self.tri_state.put_pixel(x, y, image::Rgba([128,128,128,255]));
                     }
                 }
             }
@@ -748,7 +765,7 @@ impl Matting {
 }
 
 #[no_mangle]
-pub extern "C" fn run(ori_path: *const c_char, tri_path: *const c_char, output_path: *const c_char) {
+pub extern "C" fn run(ori_path: *const c_char, tri_path: *const c_char, output_path: *const c_char, limit: c_float, dev: c_char) {
 	let ori_path = unsafe {
 		assert!(!ori_path.is_null());
 		CStr::from_ptr(ori_path)
@@ -764,6 +781,6 @@ pub extern "C" fn run(ori_path: *const c_char, tri_path: *const c_char, output_p
 		CStr::from_ptr(output_path)
 	};
 	let output_path = output_path.to_str().unwrap();
-	let mut shared = Shared::new(ori_path, tri_path);
+	let mut shared = Shared::new(ori_path, tri_path, limit, dev==1);
 	shared.run(output_path);
 }
