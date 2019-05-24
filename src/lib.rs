@@ -90,6 +90,7 @@ pub struct Shared {
     back_state: Arc<StorageImage<Format>>,
     fore_state: Arc<StorageImage<Format>>,
     ac_state: Arc<StorageImage<Format>>,
+    smooth_state: Arc<StorageImage<Format>>,
     vertex_buffer: Arc<CpuAccessibleBuffer<[Vertex]>>,
     buf: Arc<CpuAccessibleBuffer<[u8]>>,
     dev: bool,
@@ -165,6 +166,8 @@ impl Shared {
                                 Format::R8G8B8A8Unorm, Some(queue.family())).unwrap();
         let ac_state = StorageImage::new(device.clone(), Dimensions::Dim2d { width: width, height: height },
                                 Format::R8G8B8A8Unorm, Some(queue.family())).unwrap();
+        let smooth_state = StorageImage::new(device.clone(), Dimensions::Dim2d { width: width, height: height },
+                                Format::R8G8B8A8Unorm, Some(queue.family())).unwrap();
 
         let (tri_state, tri_future) = {
             if dev {
@@ -197,6 +200,7 @@ impl Shared {
             back_state: back_state,
             fore_state: fore_state,
             ac_state: ac_state,
+            smooth_state: smooth_state,
             buf: buf,
             vertex_buffer: vertex_buffer,
         }
@@ -208,7 +212,11 @@ impl Shared {
     {
         let (width, height) = self.size;
 
-        self.expand_known();
+        self.expand_known(false);
+        self.gathering();
+        self.refinement();
+        self.local_smooth();
+        self.expand_known(true);
         self.gathering();
         self.refinement();
         self.local_smooth();
@@ -225,7 +233,7 @@ impl Shared {
         image.save(output_path).unwrap();
     }
 
-    fn expand_known(&mut self) {
+    fn expand_known(&mut self, next: bool) {
         let device = &self.device;
         let queue = &self.queue;
         let (width, height) = self.size;
@@ -255,7 +263,7 @@ impl Shared {
         let push_constants = expand_known_fs::ty::PushConstants {
             scale: [width as f32, height as f32],
             kC: 5.0 / 255.0,
-            kI: 10.0,
+            kI: 5.0,
         };
 
         let pipeline = Arc::new(GraphicsPipeline::start()
@@ -281,20 +289,37 @@ impl Shared {
             MipmapMode::Nearest, SamplerAddressMode::Repeat, SamplerAddressMode::Repeat,
             SamplerAddressMode::Repeat, 0.0, 1.0, 0.0, 0.0).unwrap();
 
-        let set = Arc::new(PersistentDescriptorSet::start(pipeline.clone(), 0)
-            .add_sampled_image(self.ori_state.clone(), sampler.clone()).unwrap()
-            .add_sampled_image(self.tri_state.clone(), sampler.clone()).unwrap()
-            .add_sampled_image(self.old_state.clone(), sampler.clone()).unwrap()
-            .build().unwrap()
-        );
+        if next {
+            let set = Arc::new(PersistentDescriptorSet::start(pipeline.clone(), 0)
+                .add_sampled_image(self.ori_state.clone(), sampler.clone()).unwrap()
+                .add_sampled_image(self.smooth_state.clone(), sampler.clone()).unwrap()
+                .add_sampled_image(self.old_state.clone(), sampler.clone()).unwrap()
+                .build().unwrap()
+            );
 
-        let command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
-            .begin_render_pass(framebuffer.clone(), false, vec![[0.0, 0.0, 1.0, 1.0].into()]).unwrap()
-            .draw(pipeline.clone(), &dynamic_state, self.vertex_buffer.clone(), set.clone(), push_constants).unwrap()
-            .end_render_pass().unwrap()
-            .build().unwrap();
+            let command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
+                .begin_render_pass(framebuffer.clone(), false, vec![[0.0, 0.0, 1.0, 1.0].into()]).unwrap()
+                .draw(pipeline.clone(), &dynamic_state, self.vertex_buffer.clone(), set.clone(), push_constants).unwrap()
+                .end_render_pass().unwrap()
+                .build().unwrap();
 
-        self.future = Some(Box::new(self.future.take().unwrap().then_execute(queue.clone(), command_buffer).unwrap()) as Box<GpuFuture>);
+            self.future = Some(Box::new(self.future.take().unwrap().then_execute(queue.clone(), command_buffer).unwrap()) as Box<GpuFuture>);
+        } else {
+            let set = Arc::new(PersistentDescriptorSet::start(pipeline.clone(), 0)
+                .add_sampled_image(self.ori_state.clone(), sampler.clone()).unwrap()
+                .add_sampled_image(self.tri_state.clone(), sampler.clone()).unwrap()
+                .add_sampled_image(self.old_state.clone(), sampler.clone()).unwrap()
+                .build().unwrap()
+            );
+
+            let command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
+                .begin_render_pass(framebuffer.clone(), false, vec![[0.0, 0.0, 1.0, 1.0].into()]).unwrap()
+                .draw(pipeline.clone(), &dynamic_state, self.vertex_buffer.clone(), set.clone(), push_constants).unwrap()
+                .end_render_pass().unwrap()
+                .build().unwrap();
+
+            self.future = Some(Box::new(self.future.take().unwrap().then_execute(queue.clone(), command_buffer).unwrap()) as Box<GpuFuture>);
+        }
     }
 
     fn gathering(&mut self) {
@@ -476,9 +501,7 @@ impl Shared {
         let fore_state = &self.fore_state;
         let ac_state = &self.ac_state;
         let buf = &self.buf;
-
-        let image = StorageImage::new(device.clone(), Dimensions::Dim2d { width: width, height: height },
-                                Format::R8G8B8A8Unorm, Some(queue.family())).unwrap();
+        let image = &self.smooth_state;
         
         let render_pass = Arc::new(vulkano::single_pass_renderpass!(device.clone(),
             attachments: {

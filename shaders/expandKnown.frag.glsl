@@ -23,24 +23,16 @@ vec3 getOri(vec2 coord){
 
 vec4 getTri(){
   vec4 tri=texture(triState,(gl_FragCoord.xy)/push_constants.scale);
-  if(tri.w<1.){
+  if(tri.w<1.||tri.x>0.&&tri.y<1.){
     tri=vec4(.5,.5,.5,1);
-  }else if(tri.x<.5){
-    tri=vec4(0,0,0,1);
-  }else{
-    tri=vec4(1,1,1,1);
   }
   return tri;
 }
 
 vec4 getTri(vec2 coord){
   vec4 tri=texture(triState,coord);
-  if(tri.w<1.){
+  if(tri.w<1.||tri.x>0.&&tri.y<1.){
     tri=vec4(.5,.5,.5,1);
-  }else if(tri.x<.5){
-    tri=vec4(0,0,0,1);
-  }else{
-    tri=vec4(1,1,1,1);
   }
   return tri;
 }
